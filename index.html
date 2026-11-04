@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Pedidos por QR Code</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<style>
+:root{--bg:#faf7f2;--card:#fff;--tx:#1f1b16;--mu:#7a7266;--ac:#c2410c;--bd:#e7dfd3;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#17140f;--card:#221e18;--tx:#f3ede4;--mu:#a39a8b;--ac:#fb923c;--bd:#38322a;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 system-ui,-apple-system,Segoe UI,sans-serif}
+#app{max-width:760px;margin:0 auto;padding:14px}
+h1{font-size:22px;margin:4px 0 12px}h2{font-size:17px;margin:18px 0 8px;color:var(--ac)}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin:8px 0}
+.row{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.mu{color:var(--mu);font-size:14px}
+button,.btn{background:var(--ac);color:#fff;border:0;border-radius:10px;padding:10px 14px;font:inherit;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}
+button.g,.btn.g{background:transparent;color:var(--tx);border:1px solid var(--bd)}button.r{background:#b91c1c}
+button:disabled{opacity:.5}
+input{font:inherit;color:var(--tx);background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:8px;min-width:0}
+.tabs{display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap}
+.bar{position:sticky;bottom:0;background:var(--bg);padding:10px 0;border-top:1px solid var(--bd)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.qr svg{width:100%;height:auto;background:#fff;padding:6px;border-radius:8px}
+.tag{font-size:12px;padding:2px 8px;border-radius:99px;border:1px solid var(--bd)}
+.off{opacity:.5}
+#cupom{display:none}
+@media print{.noprint{display:none!important}.card{break-inside:avoid}body.pc #app{display:none}body.pc #cupom{display:block;width:72mm;font:12px/1.4 monospace;color:#000;background:#fff}body.pc{background:#fff}}
+</style></head><body><div id="app">Carregando…</div><div id="cupom"></div>
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {getFirestore,collection,doc,onSnapshot,addDoc,updateDoc,deleteDoc,runTransaction,query,where,orderBy} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {getAuth,signInWithEmailAndPassword,signOut,onAuthStateChanged} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+/* ===== COLE AQUI A CONFIGURAÇÃO DO SEU PROJETO FIREBASE ===== */
+const firebaseConfig={
+  apiKey:"AIzaSyA-TUt7v5XZHrtfRpuB4FmVTa43JF5BE30",
+  authDomain:"sistema-de-gestao-eb300.firebaseapp.com",
+  projectId:"sistema-de-gestao-eb300",
+  storageBucket:"sistema-de-gestao-eb300.firebasestorage.app",
+  messagingSenderId:"50335741334",
+  appId:"1:50335741334:web:1e09b7ddf3722f08d699b7"
+};
+/* ============================================================ */
+
+const app=initializeApp(firebaseConfig),db=getFirestore(app),auth=getAuth(app);
+let user=null,menu=[],orders=[],mine={},unsubOrders=null,base=location.href.split('#')[0];
+const R=v=>'R$ '+Number(v||0).toFixed(2).replace('.',',');
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const $=s=>document.querySelector(s),route=()=>(location.hash||'#').slice(1);
+const stLabel=s=>({novo:'🆕 Recebido',preparo:'🔥 Em preparo',pronto:'✅ Pronto',entregue:'Entregue'}[s]);
+const SEED=[["Pratos","Filé à parmegiana","Arroz, fritas e salada",42],["Pratos","Feijoada completa","Serve 1 pessoa",38],["Bebidas","Coca-Cola lata","350 ml",7],["Bebidas","Suco de laranja","Natural 400 ml",10],["Sobremesas","Pudim","Fatia",12]];
+let cart={};
+let autoPrint=localStorage.getItem('auto')==='1',printed=new Set(JSON.parse(localStorage.getItem('printed')||'[]')),queue=[],printing=false,btDev=null,btChar=null,btWNR=false;
+
+/* ---- dados ---- */
+onSnapshot(collection(db,"menu"),s=>{menu=s.docs.map(d=>({id:d.id,...d.data()}));render()},e=>console.error(e));
+onAuthStateChanged(auth,u=>{
+  user=u;if(unsubOrders){unsubOrders();unsubOrders=null}
+  if(u){const q=query(collection(db,"orders"),where("t",">=",Date.now()-3*864e5),orderBy("t"));
+    unsubOrders=onSnapshot(q,s=>{orders=s.docs.map(d=>({id:d.id,...d.data()}));checkPrint();render()},e=>console.error(e))}
+  else orders=[];
+  render();
+});
+// pedidos do próprio cliente (por id, sem precisar de login)
+try{JSON.parse(localStorage.getItem('meus')||'[]').slice(-10).forEach(watchMine)}catch(e){}
+function watchMine(id){onSnapshot(doc(db,"orders",id),s=>{if(s.exists()){mine[id]={id,...s.data()};render()}},()=>{})}
+addEventListener('hashchange',render);
+
+/* ---- roteamento ---- */
+function render(){
+  const r=route(),a=$('#app'),staff=['cozinha','caixa','admin','qr','relatorio'];
+  if(r.startsWith('mesa-'))return a.innerHTML=client(r.slice(5));
+  if(staff.includes(r)&&!user)return a.innerHTML=nav(r)+loginForm();
+  if(r==='cozinha')return a.innerHTML=nav(r)+kitchen();
+  if(r==='caixa')return a.innerHTML=nav(r)+caixa();
+  if(r==='relatorio')return a.innerHTML=nav(r)+relatorio();
+  if(r==='admin')return a.innerHTML=nav(r)+admin();
+  if(r==='qr')return a.innerHTML=nav(r)+qrs();
+  a.innerHTML=nav(r)+'<h1>🍽️ Sistema de pedidos</h1><p class="mu">Entre pelas abas acima (equipe) ou pelo QR da mesa (clientes).</p>';
+}
+function nav(r){const t=(k,l)=>`<a class="btn ${r===k?'':'g'}" href="#${k}">${l}</a>`;
+  return `<div class="tabs noprint">${t('cozinha','👨‍🍳 Cozinha')}${t('caixa','💰 Caixa')}${t('relatorio','📊 Relatório')}${t('admin','⚙️ Admin')}${t('qr','🔳 QR Codes')}${user?'<button class="g" onclick="logout()">Sair</button>':''}</div>`}
+function loginForm(){return `<h1>Entrar</h1><div class="card"><div class="row"><input id="em" type="email" placeholder="E-mail" style="flex:1"><input id="pw" type="password" placeholder="Senha" style="flex:1"><button onclick="login()">Entrar</button></div></div>`}
+async function login(){try{await signInWithEmailAndPassword(auth,$('#em').value,$('#pw').value)}catch(e){alert('E-mail ou senha inválidos.')}}
+const logout=()=>signOut(auth);
+
+/* ---- cliente ---- */
+function client(n){
+  const items=menu.filter(m=>m.on!==false),cats=[...new Set(items.map(m=>m.cat))];
+  const total=items.reduce((s,m)=>s+(cart[m.id]||0)*m.price,0),qty=Object.values(cart).reduce((a,b)=>a+b,0);
+  const my=Object.values(mine).filter(o=>o.mesa==n&&!o.pago).sort((a,b)=>a.t-b.t);
+  return `<h1>Mesa ${esc(n)}</h1>`+my.map(o=>`<div class="card row"><span>Pedido #${o.num}</span><span class="tag">${stLabel(o.status)}</span></div>`).join('')+
+  (!items.length?'<p class="mu">Cardápio vazio.</p>':'')+
+  cats.map(c=>`<h2>${esc(c)}</h2>`+items.filter(m=>m.cat===c).map(m=>`<div class="card row"><div><b>${esc(m.name)}</b><div class="mu">${esc(m.desc)}</div><div>${R(m.price)}</div></div>
+  <div class="row"><button class="g" onclick="chg('${m.id}',-1)">−</button><b>${cart[m.id]||0}</b><button onclick="chg('${m.id}',1)">+</button></div></div>`).join('')).join('')+
+  `<div class="card"><input id="obs" placeholder="Observações (ex.: sem cebola)" style="width:100%"></div>
+  <div class="bar row"><b>${qty} itens · ${R(total)}</b><button ${qty?'':'disabled'} onclick="send('${esc(n)}')">Enviar pedido</button></div>`;
+}
+function chg(id,d){cart[id]=Math.max(0,(cart[id]||0)+d);const o=$('#obs')?.value;render();if($('#obs'))$('#obs').value=o||''}
+async function send(n){
+  const items=menu.filter(m=>cart[m.id]).map(m=>({n:m.name,q:cart[m.id],p:m.price}));if(!items.length)return;
+  const obs=$('#obs').value.slice(0,200),total=items.reduce((s,i)=>s+i.q*i.p,0);
+  const cref=doc(db,"counters","orders"),oref=doc(collection(db,"orders"));
+  try{
+    await runTransaction(db,async t=>{
+      const s=await t.get(cref),num=(s.exists()?s.data().n:0)+1;
+      t.set(cref,{n:num});
+      t.set(oref,{num,pago:false,mesa:n,items,obs,total,status:'novo',t:Date.now()});
+    });
+    const ids=JSON.parse(localStorage.getItem('meus')||'[]');ids.push(oref.id);localStorage.setItem('meus',JSON.stringify(ids));
+    watchMine(oref.id);cart={};render();alert('Pedido enviado para a cozinha! ✅');
+  }catch(e){console.error(e);alert('Não foi possível enviar. Chame o garçom.')}
+}
+
+/* ---- cozinha ---- */
+function kitchen(){
+  const at=orders.filter(o=>o.status!=='entregue');
+  return `<h1>👨‍🍳 Cozinha <span class="tag">${at.length}</span></h1>`+`<label class="card row noprint"><span>🖨️ Imprimir pedidos automaticamente neste aparelho</span><input type="checkbox" ${autoPrint?'checked':''} onchange="setAuto(this.checked)"></label>`+`<div class="card row noprint"><span>📶 Bluetooth: ${btDev?'conectada ('+esc(btDev.name||'impressora')+')':'não conectada'}</span><span><select onchange="setCols(this.value)"><option value="32" ${(localStorage.getItem('cols')||'32')==='32'?'selected':''}>58 mm</option><option value="48" ${localStorage.getItem('cols')==='48'?'selected':''}>80 mm</option></select> <button onclick="connectBT()">Conectar</button></span></div>`+(at.length?'':'<p class="mu">Nenhum pedido no momento.</p>')+
+  at.map(o=>`<div class="card"><div class="row"><b>Pedido #${o.num} · Mesa ${esc(o.mesa)}</b><span class="tag">${stLabel(o.status)} · ${new Date(o.t).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}</span></div>
+  <ul>${o.items.map(i=>`<li><b>${i.q}×</b> ${esc(i.n)}</li>`).join('')}</ul>${o.obs?`<div class="mu">📝 ${esc(o.obs)}</div>`:''}
+  <div class="row" style="margin-top:8px"><span>${R(o.total)} <button class="g noprint" onclick="reprint('${o.id}')">🖨️</button></span><span>
+  ${o.status==='novo'?`<button onclick="st('${o.id}','preparo')">Em preparo</button>`:''}
+  ${o.status==='preparo'?`<button onclick="st('${o.id}','pronto')">Pronto</button>`:''}
+  ${o.status==='pronto'?`<button onclick="st('${o.id}','entregue')">Entregue</button>`:''}</span></div></div>`).join('');
+}
+const st=(id,s)=>updateDoc(doc(db,"orders",id),{status:s}).catch(()=>alert('Sem permissão.'));
+
+/* ---- impressão automática da cozinha ---- */
+const ticket=o=>`<div style="text-align:center;font-size:16px"><b>PEDIDO #${o.num}</b><br><b>MESA ${esc(o.mesa)}</b><br>${new Date(o.t).toLocaleString('pt-BR')}</div><hr>`+o.items.map(i=>`<b>${i.q}x</b> ${esc(i.n)}`).join('<br>')+(o.obs?`<hr>OBS: ${esc(o.obs)}`:'')+'<hr>';
+const savePrinted=()=>localStorage.setItem('printed',JSON.stringify([...printed].slice(-300)));
+function setAuto(v){autoPrint=v;localStorage.setItem('auto',v?'1':'0');if(v){orders.forEach(o=>printed.add(o.id));savePrinted()}render()}
+function checkPrint(){
+  if(!autoPrint)return;
+  orders.filter(o=>!printed.has(o.id)&&o.status==='novo').forEach(o=>{printed.add(o.id);queue.push(o)});
+  savePrinted();runQueue();
+}
+function reprint(id){const o=orders.find(x=>x.id===id);if(o){queue.push(o);runQueue()}}
+function runQueue(){
+  if(printing||!queue.length)return;printing=true;
+  const o=queue.shift();
+  if(btDev){
+    printBT(o).catch(e=>{console.error(e);alert('Falha na impressora Bluetooth. Toque em Conectar para reconectar.');btDev=null;btChar=null;render()}).finally(()=>{printing=false;runQueue()});
+    return;
+  }
+  $('#cupom').innerHTML=ticket(o);document.body.classList.add('pc');
+  setTimeout(()=>{print();document.body.classList.remove('pc');setTimeout(()=>{printing=false;runQueue()},700)},300);
+}
+
+/* ---- Bluetooth (ESC/POS via Web Bluetooth, impressoras BLE) ---- */
+const SERV=[0x18f0,0xff00,0xfff0,0xffe0,0xae30,0xffb0,0xfee7,'49535343-fe7d-4ae5-8fa9-9fafd205e455','e7810a71-73ae-499d-8c15-faa9aef0c3f2'];
+async function findChar(s){
+  for(const sv of await s.getPrimaryServices())for(const c of await sv.getCharacteristics())
+    if(c.properties.write||c.properties.writeWithoutResponse){btWNR=c.properties.writeWithoutResponse;return c}
+  return null;
+}
+async function connectBT(){
+  if(!navigator.bluetooth)return alert('Este navegador não suporta Bluetooth. Use o Chrome (Android ou computador).');
+  try{
+    const d=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:SERV});
+    const c=await findChar(await d.gatt.connect());
+    if(!c)throw new Error('sem característica de escrita');
+    btDev=d;btChar=c;render();
+  }catch(e){console.error(e);if(e.name!=='NotFoundError')alert('Não foi possível conectar. Se a impressora não aparece na lista, ela pode não ser compatível com Bluetooth BLE.')}
+}
+const setCols=v=>{localStorage.setItem('cols',v)};
+const ascii=s=>String(s).normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^\x20-\x7e]/g,'?');
+function escpos(o){
+  const e=new TextEncoder(),B=[],add=a=>B.push(...a),txt=s=>add(e.encode(ascii(s)+'\n'));
+  const line='-'.repeat(+(localStorage.getItem('cols')||32));
+  add([0x1B,0x40,0x1B,0x61,1,0x1B,0x45,1,0x1D,0x21,0x11]);txt('PEDIDO #'+o.num);txt('MESA '+o.mesa);
+  add([0x1D,0x21,0,0x1B,0x45,0]);txt(new Date(o.t).toLocaleString('pt-BR'));
+  add([0x1B,0x61,0]);txt(line);
+  add([0x1B,0x45,1]);o.items.forEach(i=>txt(i.q+'x '+i.n));add([0x1B,0x45,0]);
+  if(o.obs){txt(line);txt('OBS: '+o.obs)}
+  txt(line);add([0x0A,0x0A,0x0A,0x1D,0x56,0x00]);
+  return new Uint8Array(B);
+}
+async function printBT(o){
+  if(!btDev.gatt.connected)btChar=await findChar(await btDev.gatt.connect());
+  const b=escpos(o);
+  for(let i=0;i<b.length;i+=20){
+    const c=b.slice(i,i+20);
+    if(btWNR)await btChar.writeValueWithoutResponse(c);else await btChar.writeValue(c);
+    await new Promise(r=>setTimeout(r,25));
+  }
+}
+
+/* ---- caixa ---- */
+function caixa(){
+  const open=orders.filter(o=>!o.pago),mesas=[...new Set(open.map(o=>o.mesa))].sort((a,b)=>a-b);
+  return `<h1>💰 Caixa</h1>`+(mesas.length?'':'<p class="mu">Nenhuma conta em aberto.</p>')+mesas.map(m=>{
+    const os=open.filter(o=>o.mesa==m),tot=os.reduce((s,o)=>s+o.total,0);
+    return `<div class="card"><div class="row"><b>Mesa ${esc(m)}</b><b>${R(tot)}</b></div>`+os.map(o=>`<div style="margin-top:8px"><span class="tag">Pedido #${o.num} · ${stLabel(o.status)}</span><ul>${o.items.map(i=>`<li>${i.q}× ${esc(i.n)} — ${R(i.q*i.p)}</li>`).join('')}</ul>${o.obs?`<div class="mu">📝 ${esc(o.obs)}</div>`:''}</div>`).join('')+
+    `<div class="row noprint" style="margin-top:8px"><button class="g" onclick="cupom('${esc(m)}')">Imprimir cupom</button><button onclick="pay('${esc(m)}')">Registrar pagamento</button></div></div>`}).join('');
+}
+function pay(m){if(!confirm('Confirmar pagamento da Mesa '+m+'?'))return;orders.filter(o=>!o.pago&&o.mesa==m).forEach(o=>updateDoc(doc(db,"orders",o.id),{pago:true,status:'entregue'}).catch(()=>alert('Sem permissão.')))}
+function cupom(m){
+  const os=orders.filter(o=>!o.pago&&o.mesa==m),tot=os.reduce((s,o)=>s+o.total,0);
+  $('#cupom').innerHTML=`<div style="text-align:center"><b>COMANDA — MESA ${esc(m)}</b><br>${new Date().toLocaleString('pt-BR')}</div><hr>`+os.map(o=>`<b>Pedido #${o.num}</b><br>`+o.items.map(i=>`${i.q}x ${esc(i.n)} — ${R(i.q*i.p)}`).join('<br>')+(o.obs?`<br>Obs: ${esc(o.obs)}`:'')+'<hr>').join('')+`<b>TOTAL: ${R(tot)}</b>`;
+  document.body.classList.add('pc');print();setTimeout(()=>document.body.classList.remove('pc'),800);
+}
+
+/* ---- relatório ---- */
+function relatorio(){
+  const d0=new Date();d0.setHours(0,0,0,0);
+  const hoje=orders.filter(o=>o.t>=d0.getTime()),pg=hoje.filter(o=>o.pago),ab=hoje.filter(o=>!o.pago);
+  const sum=a=>a.reduce((s,o)=>s+o.total,0),cnt={};
+  hoje.forEach(o=>o.items.forEach(i=>cnt[i.n]=(cnt[i.n]||0)+i.q));
+  const top=Object.entries(cnt).sort((a,b)=>b[1]-a[1]).slice(0,10);
+  return `<h1>📊 Relatório de hoje</h1><div class="grid"><div class="card"><div class="mu">Faturamento (pago)</div><b>${R(sum(pg))}</b></div><div class="card"><div class="mu">Pedidos</div><b>${hoje.length}</b></div><div class="card"><div class="mu">Valor médio por pedido</div><b>${R(pg.length?sum(pg)/pg.length:0)}</b></div><div class="card"><div class="mu">Em aberto</div><b>${R(sum(ab))}</b></div></div><h2>Mais vendidos</h2>`+(top.length?top.map(([n,q])=>`<div class="card row"><span>${esc(n)}</span><b>${q}×</b></div>`).join(''):'<p class="mu">Sem vendas hoje.</p>');
+}
+
+/* ---- admin ---- */
+function admin(){
+  const cats=[...new Set(menu.map(m=>m.cat))];
+  return `<h1>⚙️ Painel administrativo</h1>
+  <div class="card"><b>Novo item</b><div class="row" style="margin-top:8px">
+  <input id="nn" placeholder="Nome"><input id="nc" list="cl" placeholder="Categoria (Pratos, Bebidas…)"><datalist id="cl">${cats.map(c=>`<option value="${esc(c)}">`).join('')}</datalist>
+  <input id="nd" placeholder="Descrição"><input id="np" type="number" step="0.01" placeholder="Preço" style="width:100px"><button onclick="add()">Adicionar</button></div></div>
+  ${menu.length?'':'<button class="g" onclick="seed()">Carregar cardápio de exemplo</button>'}
+  ${cats.map(c=>`<h2>${esc(c)}</h2>`+menu.filter(m=>m.cat===c).map(m=>`<div class="card ${m.on===false?'off':''}"><div class="row">
+  <input value="${esc(m.name)}" onchange="up('${m.id}','name',this.value)" style="flex:1">
+  <input type="number" step="0.01" value="${m.price}" onchange="up('${m.id}','price',+this.value)" style="width:90px"></div>
+  <div class="row" style="margin-top:6px"><input value="${esc(m.desc)}" onchange="up('${m.id}','desc',this.value)" style="flex:1">
+  <input value="${esc(m.cat)}" onchange="up('${m.id}','cat',this.value)" style="width:110px">
+  <button class="g" onclick="up('${m.id}','on',${m.on===false})">${m.on===false?'Ativar':'Esgotar'}</button>
+  <button class="r" onclick="del('${m.id}')">🗑</button></div></div>`).join('')).join('')}`;
+}
+const up=(id,k,v)=>updateDoc(doc(db,"menu",id),{[k]:v}).catch(()=>alert('Sem permissão.'));
+const del=id=>confirm('Excluir item?')&&deleteDoc(doc(db,"menu",id));
+function add(){const n=$('#nn').value.trim(),c=$('#nc').value.trim()||'Pratos',p=parseFloat($('#np').value);if(!n||isNaN(p))return alert('Informe nome e preço.');addDoc(collection(db,"menu"),{name:n,cat:c,desc:$('#nd').value,price:p,on:true})}
+function seed(){SEED.forEach(([cat,name,desc,price])=>addDoc(collection(db,"menu"),{cat,name,desc,price,on:true}))}
+
+/* ---- QR codes ---- */
+function qrs(){
+  let h=`<h1>🔳 QR Codes das mesas</h1><div class="card noprint"><div class="mu">Endereço do site:</div><input id="bu" value="${esc(base)}" style="width:100%" onchange="setBase(this.value)"><div style="margin-top:8px"><button onclick="print()">Imprimir</button></div></div><div class="grid">`;
+  for(let i=1;i<=10;i++){const q=qrcode(0,'M');q.addData(base+'#mesa-'+i);q.make();h+=`<div class="card qr" style="text-align:center">${q.createSvgTag({scalable:true})}<b>Mesa ${i}</b></div>`}
+  return h+'</div>';
+}
+const setBase=v=>{base=v;render()};
+
+Object.assign(window,{chg,send,st,pay,cupom,up,del,add,seed,login,logout,setBase,setAuto,reprint,connectBT,setCols});
+</script></body></html>
